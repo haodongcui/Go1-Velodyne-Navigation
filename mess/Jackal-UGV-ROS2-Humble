@@ -1,0 +1,263 @@
+# Jackal-UGV-ROS2-Humble
+
+## 参考资料
+
+- [Jackal UGV 文档（ROS2 Humble）](https://docs.clearpathrobotics.com/docs/ros2humble/ros/)
+
+- [Jackal UGV 文档（ROS2 Foxy）](https://clearpathrobotics.com/assets/guides/foxy/jackal/index.html)
+
+- 小鱼ros2一键安装命令
+
+```bash
+wget http://fishros.com/install -O fishros && . fishros
+```
+
+本文所使用的硬件
+- Ubuntu 22.04
+- ROS2 Humble
+- Jetson Orin NX
+
+## 下载并编译 clearpath 的 ros2 humble 版本的包
+
+```bash
+#!/bin/bash
+
+mkdir -p ~/colcon_ws/src
+cd ~/colcon_ws/src
+
+git clone -b humble https://github.com/clearpathrobotics/clearpath_msgs.git
+git clone -b humble https://github.com/clearpathrobotics/clearpath_common.git
+git clone -b humble https://github.com/clearpathrobotics/clearpath_config.git
+git clone -b humble https://github.com/clearpathrobotics/clearpath_robot.git
+git clone -b humble https://github.com/clearpathrobotics/clearpath_simulator.git
+
+cd ..
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+# 如遇网络问题，可使用小鱼的 rosdepc 国内源安装依赖
+# rosdepc update
+# rosdepc install --from-paths src --ignore-src -r -y
+
+# 编译工作空间
+colcon build --symlink-install
+source install/setup.bash
+echo "source ~/colcon_ws/install/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+
+# 安装 Jackal 固件驱动
+sudo apt-get update && sudo apt-get install -y ros-humble-jackal-firmware
+```
+
+注意，如果有因为其他包导致的编译混乱问题，可以按照下面这几行命令来操作
+
+```bash
+#!/bin/bash
+
+# 注意:
+# 先清除旧的编译结果, 再source最干净的ros环境
+# 这样编译就不会依赖其他个人工作空间的包
+
+cd ~/colcon_ws
+rm -rf build/ install/ log/
+unset AMENT_PREFIX_PATH
+unset CMAKE_PREFIX_PATH
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+
+echo "source ~/colcon_ws/install/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+## 设置小车的配置文件并生成相应的 launch 文件
+
+clearpath统一把机器人按照配置文件进行生成，所以我们需要配置 jackal ugv 的配置文件，小车+相机 的配置文件如下，具体如何生成继续往下看
+
+```bash
+# 1. 编辑您的配置，下面我有写具体配置信息
+vim ~/clearpath/robot.yaml
+
+# 2. 复制到系统目录
+sudo cp ~/clearpath/robot.yaml /etc/clearpath/robot.yaml
+
+# 3. 生成小车需要的 launch 文件
+source /opt/ros/humble/setup.bash
+source ~/clearpath_ws/install/setup.bash
+ros2 run clearpath_generator_common generate_bash -s /etc/clearpath
+ros2 run clearpath_generator_robot generate_launch -s /etc/clearpath
+ros2 run clearpath_generator_robot generate_param -s /etc/clearpath
+
+# 4. 启动机器人
+ros2 launch /etc/clearpath/platform/launch/platform-service.launch.py   # 启动底盘驱动
+ros2 launch /etc/clearpath/sensors/launch/sensors-service.launch.py     # 启动传感器驱动
+```
+
+配置文件 `~/clearpath/robot.yaml` 的具体配置内容：
+
+```yaml
+serial_number: j100-0000
+version: 0
+system:
+  username: nvidia
+  hosts:
+    - hostname: nvidia-desktop  # 修改：匹配你真实的机器名
+      ip: 192.168.131.1         # 修改：对应 br0 的网关 IP
+  ros2:
+    namespace: j100_0000
+
+platform:
+  controller: ps4  # 如果你有手柄，保留这个；没有也没关系
+  battery:
+    model: HE2613
+    configuration: S1P1
+  # 注意：不要在这里手动写 /dev/ttyACM0，驱动会自动找 /dev/jackal
+  # 如果驱动报错连不上 MCU，请检查 USB 线或 udev 规则
+
+attachments:
+  - name: front_fender
+    type: j100.fender
+  - name: rear_fender
+    type: j100.fender
+    rpy: [0.0, 0.0, 3.1415]
+
+# 传感器部分：雷达和相机都在这里
+sensors:
+  # 1. 配置 VLP-16 雷达 (暂时不需要)
+  #lidar3d:
+  #  - model: velodyne_lidar
+  #    name: velodyne
+  #    parent: base_link       # 安装在中间支架
+  #    xyz: [0.0, 0.0, 0.1]    # 根据实际安装微调高度
+  #    rpy: [0.0, 0.0, 0.0]
+  #    port: 2368              # VLP16 默认端口
+
+  # 2. 配置 RealSense 相机
+  camera:
+    - model: intel_realsense
+      name: camera_0
+      parent: base_link
+      xyz: [0.10, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
+      ros_parameters:
+        intel_realsense:
+          serial_no: ''           # 留空 = 自动检测第一个相机
+          device_type: 'd435i'    # 必须指定：d415, d435, 或 d435i
+          enable_color: true
+          enable_depth: true
+          pointcloud.enable: true
+          rgb_camera.profile: "640,480,30"
+          depth_module.profile: "640,480,30"
+```
+
+生成了小车的 launch 文件之后，就可以直接启动小车了
+
+```bash
+ros2 launch /etc/clearpath/platform/launch/platform-service.launch.py   # 启动底盘驱动
+ros2 launch /etc/clearpath/sensors/launch/sensors-service.launch.py     # 启动传感器驱动
+```
+
+## 配置 Realsense d435i 深度相机
+
+```bash
+
+cd ~
+git clone https://github.com/realsenseai/librealsense.git
+cd librealsense
+git branch -r | grep "r/25"     # 查看所有可用的稳定版本分支
+git checkout r/257_6            # 切换到最新稳定版 r/257_6
+
+rm -rf build
+mkdir build && cd build
+
+cmake .. \
+-DCMAKE_BUILD_TYPE=Release \
+-DBUILD_WITH_CUDA=true \
+-DFORCE_RSUSB_BACKEND=true \
+-DBUILD_EXAMPLES=true \
+-DBUILD_GRAPHICAL_EXAMPLES=true \
+-DBUILD_PYTHON_BINDINGS=bool:true \
+-DPYTHON_EXECUTABLE=$(which python3)
+
+# 编译安装
+make -j$(nproc)     # 使用所有 CPU 核心编译
+sudo make install   # 安装
+sudo ldconfig       # 更新动态链接库缓存
+
+# 安装 udev 规则, udev指的是linux设备管理器
+sudo cp ~/librealsense/config/99-realsense-libusb.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+hash -r  # 清除缓存
+
+# 测试安装
+realsense-viewer --version
+realsense-viewer --list-devices # 列出所有设备
+
+# 安装 realsense 的 ros 驱动
+cd ~/colcon_ws/src
+git clone -b ros2-development https://github.com/IntelRealSense/realsense-ros.git
+# git clone -b ros2-development https://gitcode.com/gh_mirrors/re/realsense-ros.git # 若下载太慢，可使用国内镜像
+
+cd realsense-ros
+colcon build --symlink-install --cmake-args -Drealsense2_DIR=/usr/local/lib/cmake/realsense2
+```
+
+## 总结
+
+已完成：
+
+- 小车的固件通过系统依赖安装完成
+
+- 小车 ros包 通过下载github仓库并编译安装，且生成了 launch 文件，可直接启动
+
+- 相机的固件从源码编译安装完毕
+
+- 相机的ros包下载并编译完毕
+
+
+## 命令汇总
+
+如果下面这俩命令没有写入到 `~/.bashrc`，那就需要在每个终端运行 ros2 命令前激活相应的环境，再运行相应的 ros 命令
+
+```bash
+source /opt/ros/humble/setup.bash   # 激活 ros2 环境
+source /etc/clearpath/setup.bash    # 激活 clearpath 环境
+```
+
+```bash
+ros2 launch /etc/clearpath/platform/launch/platform-service.launch.py   # 启动底盘驱动
+ros2 launch /etc/clearpath/sensors/launch/sensors-service.launch.py     # 启动传感器驱动
+ros2 launch clearpath_viz view_robot.launch.py namespace:=j100_0000     # 启动 rviz2 可视化
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/j100_0000/rc_teleop/cmd_vel    # 键盘遥控
+```
+
+## 补充：用网线连接开发板
+
+如果想用一根网线，将自己的电脑与上位机连接，并通过ssh进行开发，那么需要分配一下ipv4的网络ip。
+
+Jackal 默认的出厂内部网段通常是 192.168.131.x，所以为了能够控制小车，需要将网络ip设在这个网段内，
+
+- 给小车上位机分配 `192.168.131.1/24`
+
+- 给自己电脑分配 `192.168.131.100/24` (100是空闲的ip)
+
+其中的 `/24` 表示子网掩码是 `255.255.255.0` 的意思
+
+具体操作：
+
+在两台机子上分别打开终端，输入 `ifconfig` 或 `ip a` 查看网卡名称。通常有线网卡名称以 e 开头，如 enp3s0, eth0, eno1 等，记下各自对应的网卡名称。
+
+在上位机上临时设置相应的ipv4进行测试：
+```bash
+sudo ip addr flush dev eth0                 # 清理ip
+sudo ip addr add 192.168.131.1/24 dev eth0  # 添加标准ip
+sudo ip link set eth0 up                    # 启动网卡
+```
+
+在自己电脑上，设置有线网口 ipv4 为手动，具体地址设置为
+- 地址: 192.168.131.100
+- 掩码: 255.255.255.0
+
+在自己电脑上，ping一下上位机试试能不能连上，如果有正常的返回结果说明连通了
+```bash
+ping 192.168.131.1
+```
